@@ -16,17 +16,19 @@
  */
 
 package org.opencord.aaa.impl;
+import static org.slf4j.LoggerFactory.getLogger;
 
-import com.google.common.collect.Maps;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
 import org.onlab.packet.MacAddress;
 import org.onosproject.net.ConnectPoint;
 import org.opencord.aaa.AuthenticationEvent;
 import org.opencord.aaa.StateMachineDelegate;
 import org.slf4j.Logger;
 
-import java.util.Map;
-
-import static org.slf4j.LoggerFactory.getLogger;
+import com.google.common.collect.Maps;
 
 /**
  * AAA Finite State Machine.
@@ -40,6 +42,13 @@ class StateMachine {
     static final int STATE_AUTHORIZED = 3;
     static final int STATE_UNAUTHORIZED = 4;
 
+    //Defining the states where timeout can happen
+    static final Set<Integer> TIMEOUT_ELIGIBLE_STATES = new HashSet();
+    static {
+        TIMEOUT_ELIGIBLE_STATES.add(STATE_IDLE);
+        TIMEOUT_ELIGIBLE_STATES.add(STATE_STARTED);
+        TIMEOUT_ELIGIBLE_STATES.add(STATE_PENDING);
+    }
     //INDEX to identify the transition in the transition table
     static final int TRANSITION_START = 0; // --> started
     static final int TRANSITION_REQUEST_ACCESS = 1;
@@ -59,6 +68,8 @@ class StateMachine {
     private short vlanId;
     private byte priorityCode;
 
+    private static int cleanupTimerTimeOutInMins;
+
     private String sessionId = null;
 
     private final Logger log = getLogger(getClass());
@@ -67,7 +78,10 @@ class StateMachine {
             new Idle(), new Started(), new Pending(), new Authorized(), new Unauthorized()
     };
 
+    // Cleanup Timer instance created for this session
+    private java.util.concurrent.ScheduledFuture<?> cleanupTimer = null;
 
+    private long lastEapolRadiusPacketReceivedTime;
     //State transition table
     /*
 
@@ -88,20 +102,20 @@ class StateMachine {
      */
 
     private int[] idleTransition =
-            {STATE_STARTED, STATE_IDLE, STATE_IDLE, STATE_IDLE, STATE_IDLE};
+        {STATE_STARTED, STATE_IDLE, STATE_IDLE, STATE_IDLE, STATE_IDLE};
     private int[] startedTransition =
-            {STATE_STARTED, STATE_PENDING, STATE_STARTED, STATE_STARTED, STATE_STARTED};
+        {STATE_STARTED, STATE_PENDING, STATE_STARTED, STATE_STARTED, STATE_STARTED};
     private int[] pendingTransition =
-            {STATE_PENDING, STATE_PENDING, STATE_AUTHORIZED, STATE_UNAUTHORIZED, STATE_PENDING};
+        {STATE_PENDING, STATE_PENDING, STATE_AUTHORIZED, STATE_UNAUTHORIZED, STATE_PENDING};
     private int[] authorizedTransition =
-            {STATE_STARTED, STATE_AUTHORIZED, STATE_AUTHORIZED, STATE_AUTHORIZED, STATE_IDLE};
+        {STATE_STARTED, STATE_AUTHORIZED, STATE_AUTHORIZED, STATE_AUTHORIZED, STATE_IDLE};
     private int[] unauthorizedTransition =
-            {STATE_STARTED, STATE_UNAUTHORIZED, STATE_UNAUTHORIZED, STATE_UNAUTHORIZED, STATE_IDLE};
+        {STATE_STARTED, STATE_UNAUTHORIZED, STATE_UNAUTHORIZED, STATE_UNAUTHORIZED, STATE_IDLE};
 
     //THE TRANSITION TABLE
     private int[][] transition =
-            {idleTransition, startedTransition, pendingTransition, authorizedTransition,
-                    unauthorizedTransition};
+        {idleTransition, startedTransition, pendingTransition, authorizedTransition,
+                unauthorizedTransition};
 
     private int currentState = STATE_IDLE;
 
@@ -111,6 +125,10 @@ class StateMachine {
     private static Map<Integer, StateMachine> identifierMap;
 
     private static StateMachineDelegate delegate;
+
+    //@Reference(cardinality = ReferenceCardinality.MANDATORY_UNARY)
+    //protected AuthenticationStatisticsService aaaStatisticsManager;
+
 
     public static void initializeMaps() {
         sessionIdMap = Maps.newConcurrentMap();
@@ -125,6 +143,10 @@ class StateMachine {
 
     public static void setDelegate(StateMachineDelegate delegate) {
         StateMachine.delegate = delegate;
+    }
+
+    public static void  setcleanupTimerTimeOutInMins(int cleanupTimerTimeoutInMins) {
+        cleanupTimerTimeOutInMins = cleanupTimerTimeoutInMins;
     }
 
     public static void unsetDelegate(StateMachineDelegate delegate) {
@@ -145,8 +167,26 @@ class StateMachine {
         return sessionIdMap.get(sessionId);
     }
 
+
+    public static void deleteStateMachineId(String sessionId) {
+        sessionIdMap.remove(sessionId);
+    }
+
+
     public static void deleteStateMachineMapping(StateMachine machine) {
         identifierMap.entrySet().removeIf(e -> e.getValue().equals(machine));
+        if(machine.cleanupTimer != null) {
+            machine.cleanupTimer.cancel(false);
+            machine.cleanupTimer = null;
+        }
+    }
+
+    public java.util.concurrent.ScheduledFuture<?> getCleanupTimer() {
+        return cleanupTimer;
+    }
+
+    public void setCleanupTimer(java.util.concurrent.ScheduledFuture<?> cleanupTimer) {
+        this.cleanupTimer = cleanupTimer;
     }
 
     /**
@@ -162,7 +202,7 @@ class StateMachine {
             // and identifier map as well as call delete identifier to clean up
             // the identifier bit set.
             if (e.getValue() != null && e.getValue().supplicantAddress != null &&
-                   e.getValue().supplicantAddress.equals(mac)) {
+                    e.getValue().supplicantAddress.equals(mac)) {
                 sessionIdMap.remove(e.getValue().sessionId);
                 if (e.getValue().identifier != -1) {
                     deleteStateMachineMapping(e.getValue());
@@ -217,6 +257,24 @@ class StateMachine {
      */
     public void setSupplicantAddress(MacAddress supplicantAddress) {
         this.supplicantAddress = supplicantAddress;
+    }
+
+    /**
+     * Sets the lastEapolRadiusPacketReceivedTime.
+     *
+     * @param lastEapolRadiusPacketReceivedTime timelastPacket was received
+     */
+    public  void setlastEapolRadiusPacketReceivedTime(long lastEapolRadiusPacketReceivedTime) {
+        this.lastEapolRadiusPacketReceivedTime = lastEapolRadiusPacketReceivedTime;
+    }
+
+    /**
+     * Gets the lastEapolRadiusPacketReceivedTime.
+     *
+     * @return lastEapolRadiusPacketReceivedTime
+     */
+    public long getlastEapolRadiusPacketReceivedTime() {
+        return lastEapolRadiusPacketReceivedTime;
     }
 
     /**
@@ -501,6 +559,7 @@ class StateMachine {
         private final Logger log = getLogger(getClass());
         private String name = "IDLE_STATE";
 
+        @Override
         public void start() {
             log.info("Moving from IDLE state to STARTED state.");
         }
@@ -513,6 +572,7 @@ class StateMachine {
         private final Logger log = getLogger(getClass());
         private String name = "STARTED_STATE";
 
+        @Override
         public void requestAccess() {
             log.info("Moving from STARTED state to PENDING state.");
         }
@@ -525,10 +585,12 @@ class StateMachine {
         private final Logger log = getLogger(getClass());
         private String name = "PENDING_STATE";
 
+        @Override
         public void radiusAccepted() {
             log.info("Moving from PENDING state to AUTHORIZED state.");
         }
 
+        @Override
         public void radiusDenied() {
             log.info("Moving from PENDING state to UNAUTHORIZED state.");
         }
@@ -541,10 +603,12 @@ class StateMachine {
         private final Logger log = getLogger(getClass());
         private String name = "AUTHORIZED_STATE";
 
+        @Override
         public void start() {
             log.info("Moving from AUTHORIZED state to STARTED state.");
         }
 
+        @Override
         public void logoff() {
 
             log.info("Moving from AUTHORIZED state to IDLE state.");
@@ -558,14 +622,57 @@ class StateMachine {
         private final Logger log = getLogger(getClass());
         private String name = "UNAUTHORIZED_STATE";
 
+        @Override
         public void start() {
             log.info("Moving from UNAUTHORIZED state to STARTED state.");
         }
 
+        @Override
         public void logoff() {
             log.info("Moving from UNAUTHORIZED state to IDLE state.");
         }
     }
 
+
+    /**
+     * Class for cleaning the StateMachine for those session for which no response is coming--implementing timeout.
+     */
+    class CleanupTimerTask implements Runnable {
+        private final Logger log = getLogger(getClass());
+        private String sessionId;
+        private AaaManager aaaManager;
+        CleanupTimerTask(String sessionId, AaaManager aaaManager) {
+            this.sessionId = sessionId;
+            this.aaaManager = aaaManager;
+        }
+
+        @Override
+        public void run() {
+            StateMachine stateMachine = StateMachine.lookupStateMachineBySessionId(sessionId);
+            if (null != stateMachine) {
+                boolean noTrafficWithinThreshold = System.currentTimeMillis() -
+                        stateMachine.getlastEapolRadiusPacketReceivedTime() >
+                (cleanupTimerTimeOutInMins * 60 * 60) / 2;
+                if ((TIMEOUT_ELIGIBLE_STATES.contains(stateMachine.state())) && noTrafficWithinThreshold) {
+                    log.info("Deleting StateMachineMapping for sessionId: {}", sessionId);
+                    cleanupTimer = null;
+                    if (stateMachine.state() == STATE_PENDING) {
+                        aaaManager.aaaStatisticsManager.getAaaStats().increaseTimedOutPackets();
+
+                    }
+                    deleteStateMachineId(sessionId);
+                    deleteStateMachineMapping(stateMachine);
+
+                }
+                else {
+                    aaaManager.scheduleTimer(sessionId, stateMachine);
+
+                }
+            } else {
+                log.info("state-machine not found for sessionId: {}", sessionId);
+            }
+
+        }
+    }
 
 }
