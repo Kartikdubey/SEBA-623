@@ -81,7 +81,7 @@ class StateMachine {
     // Cleanup Timer instance created for this session
     private java.util.concurrent.ScheduledFuture<?> cleanupTimer = null;
 
-    private long lastEapolRadiusPacketReceivedTime;
+    private long lastPacketReceivedTime;
     //State transition table
     /*
 
@@ -175,7 +175,7 @@ class StateMachine {
 
     public static void deleteStateMachineMapping(StateMachine machine) {
         identifierMap.entrySet().removeIf(e -> e.getValue().equals(machine));
-        if(machine.cleanupTimer != null) {
+        if (machine.cleanupTimer != null) {
             machine.cleanupTimer.cancel(false);
             machine.cleanupTimer = null;
         }
@@ -260,21 +260,21 @@ class StateMachine {
     }
 
     /**
-     * Sets the lastEapolRadiusPacketReceivedTime.
+     * Sets the lastPacketReceivedTime.
      *
-     * @param lastEapolRadiusPacketReceivedTime timelastPacket was received
+     * @param lastPacketReceivedTime timelastPacket was received
      */
-    public  void setlastEapolRadiusPacketReceivedTime(long lastEapolRadiusPacketReceivedTime) {
-        this.lastEapolRadiusPacketReceivedTime = lastEapolRadiusPacketReceivedTime;
+    public  void setlastPacketReceivedTime(long lastPacketReceivedTime) {
+        this.lastPacketReceivedTime = lastPacketReceivedTime;
     }
 
     /**
-     * Gets the lastEapolRadiusPacketReceivedTime.
+     * Gets the lastPacketReceivedTime.
      *
-     * @return lastEapolRadiusPacketReceivedTime
+     * @return lastPacketReceivedTime
      */
-    public long getlastEapolRadiusPacketReceivedTime() {
-        return lastEapolRadiusPacketReceivedTime;
+    public long getlastPacketReceivedTime() {
+        return lastPacketReceivedTime;
     }
 
     /**
@@ -651,22 +651,19 @@ class StateMachine {
             StateMachine stateMachine = StateMachine.lookupStateMachineBySessionId(sessionId);
             if (null != stateMachine) {
                 boolean noTrafficWithinThreshold = System.currentTimeMillis() -
-                        stateMachine.getlastEapolRadiusPacketReceivedTime() >
+                        stateMachine.getlastPacketReceivedTime() >
                 (cleanupTimerTimeOutInMins * 60 * 60) / 2;
                 if ((TIMEOUT_ELIGIBLE_STATES.contains(stateMachine.state())) && noTrafficWithinThreshold) {
                     log.info("Deleting StateMachineMapping for sessionId: {}", sessionId);
                     cleanupTimer = null;
-                    if (stateMachine.state() == STATE_PENDING) {
+                    log.info("wait radius response :{}", aaaManager.isWaitRadiusResponse());
+                    if (stateMachine.state() == STATE_PENDING && aaaManager.isWaitRadiusResponse()) {
                         aaaManager.aaaStatisticsManager.getAaaStats().increaseTimedOutPackets();
-
                     }
                     deleteStateMachineId(sessionId);
                     deleteStateMachineMapping(stateMachine);
-
-                }
-                else {
+                } else {
                     aaaManager.scheduleTimer(sessionId, stateMachine);
-
                 }
             } else {
                 log.info("state-machine not found for sessionId: {}", sessionId);

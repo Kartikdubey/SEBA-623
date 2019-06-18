@@ -139,6 +139,13 @@ implements AuthenticationService {
     // Parsed RADIUS server addresses
     protected InetAddress radiusIpAddress;
 
+    // To check response from RADIUS SERVER
+    boolean waitRadiusResponse;
+
+    public boolean isWaitRadiusResponse() {
+        return waitRadiusResponse;
+    }
+
     // MAC address of RADIUS server or net hop router
     protected String radiusMacAddress;
 
@@ -343,6 +350,7 @@ implements AuthenticationService {
      * @param inPkt        Incoming EAPOL packet
      */
     protected void sendRadiusPacket(RADIUS radiusPacket, InboundPacket inPkt) {
+        this.waitRadiusResponse = true;
         outPacketSet.add(radiusPacket.getIdentifier());
         aaaStatisticsManager.getAaaStats().increaseOrDecreasePendingRequests(true);
         aaaStatisticsManager.getAaaStats().increaseAccessRequestsTx();
@@ -385,8 +393,9 @@ implements AuthenticationService {
         }
         EAP eapPayload;
         Ethernet eth;
-        stateMachine.setlastEapolRadiusPacketReceivedTime(System.currentTimeMillis());
+        stateMachine.setlastPacketReceivedTime(System.currentTimeMillis());
         checkReceivedPacketForValidValidator(radiusPacket);
+        this.waitRadiusResponse = false;
         if (outPacketSet.contains(radiusPacket.getIdentifier())) {
             aaaStatisticsManager.getAaaStats().increaseOrDecreasePendingRequests(false);
             outPacketSet.remove(new Byte(radiusPacket.getIdentifier()));
@@ -551,7 +560,7 @@ implements AuthenticationService {
             } else {
                 log.debug("Using existing state-machine for sessionId: {}", sessionId);
             }
-            stateMachine.setlastEapolRadiusPacketReceivedTime(System.currentTimeMillis());
+            stateMachine.setlastPacketReceivedTime(System.currentTimeMillis());
             switch (eapol.getEapolType()) {
             case EAPOL.EAPOL_START:
                 log.debug("EAP packet: EAPOL_START");
