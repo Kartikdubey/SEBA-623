@@ -139,13 +139,6 @@ implements AuthenticationService {
     // Parsed RADIUS server addresses
     protected InetAddress radiusIpAddress;
 
-    // To check response from RADIUS SERVER
-    boolean waitRadiusResponse;
-
-    public boolean isWaitRadiusResponse() {
-        return waitRadiusResponse;
-    }
-
     // MAC address of RADIUS server or net hop router
     protected String radiusMacAddress;
 
@@ -161,7 +154,7 @@ implements AuthenticationService {
     // our unique identifier
     private ApplicationId appId;
 
-    // Time out to be configured
+    // TimeOut time for cleaning up stateMachines stuck due to pending AAA/EAPOL message.
     protected int cleanupTimerTimeOutInMins;
 
     // Setup specific customization/attributes on the RADIUS packets
@@ -182,8 +175,8 @@ implements AuthenticationService {
     AaaConfig newCfg;
 
     ScheduledFuture<?> scheduledFuture;
-    ScheduledFuture<?> cleanupTimer;
-    ScheduledExecutorService executor, scheduler;
+
+    ScheduledExecutorService executor;
     String configuredAaaServerAddress;
     HashSet<Byte> outPacketSet = new HashSet<Byte>();
     // Configuration properties factory
@@ -258,7 +251,6 @@ implements AuthenticationService {
         impl.requestIntercepts();
         deviceService.addListener(deviceListener);
         getConfiguredAaaServerAddress();
-        scheduler = Executors.newSingleThreadScheduledExecutor();
         authenticationStatisticsPublisher = new AuthenticationStatisticsEventPublisher();
         executor = Executors.newScheduledThreadPool(1);
         scheduledFuture = executor.scheduleAtFixedRate(authenticationStatisticsPublisher, 0, statisticsGenerationEvent,
@@ -350,7 +342,6 @@ implements AuthenticationService {
      * @param inPkt        Incoming EAPOL packet
      */
     protected void sendRadiusPacket(RADIUS radiusPacket, InboundPacket inPkt) {
-        this.waitRadiusResponse = true;
         outPacketSet.add(radiusPacket.getIdentifier());
         aaaStatisticsManager.getAaaStats().increaseOrDecreasePendingRequests(true);
         aaaStatisticsManager.getAaaStats().increaseAccessRequestsTx();
@@ -358,16 +349,15 @@ implements AuthenticationService {
     }
 
     /**
-     * For scheduling the timer-required for configuring timeout when no response
+     * For scheduling the timer required for cleaning up StateMachine when no response
      * from RADIUS SERVER.
      *
      * @param sessionId    SessionId of the current session
      * @param stateMachine StateMachine for the id
      */
-    public void scheduleTimer(String sessionId, StateMachine stateMachine) {
-
+    public void scheduleStateMachineCleanupTimer(String sessionId, StateMachine stateMachine) {
         StateMachine.CleanupTimerTask cleanupTask = stateMachine.new CleanupTimerTask(sessionId, this);
-        cleanupTimer = scheduler.schedule(cleanupTask, cleanupTimerTimeOutInMins, TimeUnit.MINUTES);
+        ScheduledFuture<?> cleanupTimer = executor.schedule(cleanupTask, cleanupTimerTimeOutInMins, TimeUnit.MINUTES);
         stateMachine.setCleanupTimer(cleanupTimer);
 
     }
@@ -393,9 +383,9 @@ implements AuthenticationService {
         }
         EAP eapPayload;
         Ethernet eth;
-        stateMachine.setlastPacketReceivedTime(System.currentTimeMillis());
+        stateMachine.setLastPacketReceivedTime(System.currentTimeMillis());
         checkReceivedPacketForValidValidator(radiusPacket);
-        this.waitRadiusResponse = false;
+        stateMachine.setWaitingForRadiusResponse(false);
         if (outPacketSet.contains(radiusPacket.getIdentifier())) {
             aaaStatisticsManager.getAaaStats().increaseOrDecreasePendingRequests(false);
             outPacketSet.remove(new Byte(radiusPacket.getIdentifier()));
@@ -542,7 +532,6 @@ implements AuthenticationService {
             Ethernet ethPkt = inPacket.parsed();
             // Where does it come from?
             MacAddress srcMac = ethPkt.getSourceMAC();
-
             DeviceId deviceId = inPacket.receivedFrom().deviceId();
             PortNumber portNumber = inPacket.receivedFrom().port();
             String sessionId = deviceId.toString() + portNumber.toString();
@@ -557,18 +546,20 @@ implements AuthenticationService {
                 log.debug("Creating new state machine for sessionId: {} for " + "dev/port: {}/{}", sessionId, deviceId,
                         portNumber);
                 stateMachine = new StateMachine(sessionId);
+
             } else {
                 log.debug("Using existing state-machine for sessionId: {}", sessionId);
             }
-            stateMachine.setlastPacketReceivedTime(System.currentTimeMillis());
+
             switch (eapol.getEapolType()) {
             case EAPOL.EAPOL_START:
                 log.debug("EAP packet: EAPOL_START");
                 stateMachine.setSupplicantConnectpoint(inPacket.receivedFrom());
                 if (stateMachine.getCleanupTimer() == null) {
-                    scheduleTimer(sessionId, stateMachine);
+                    scheduleStateMachineCleanupTimer(sessionId, stateMachine);
 
                 }
+
                 stateMachine.start();
 
                 // send an EAP Request/Identify to the supplicant
@@ -611,6 +602,7 @@ implements AuthenticationService {
                     radiusPayload.addMessageAuthenticator(AaaManager.this.radiusSecret);
 
                     sendRadiusPacket(radiusPayload, inPacket);
+                    stateMachine.setWaitingForRadiusResponse(true);
 
                     // change the state to "PENDING"
                     if (stateMachine.state() == StateMachine.STATE_PENDING) {
@@ -634,6 +626,7 @@ implements AuthenticationService {
                         }
                         radiusPayload.addMessageAuthenticator(AaaManager.this.radiusSecret);
                         sendRadiusPacket(radiusPayload, inPacket);
+                        stateMachine.setWaitingForRadiusResponse(true);
                     }
                     break;
                 case EAP.ATTR_TLS:
@@ -649,6 +642,7 @@ implements AuthenticationService {
 
                     radiusPayload.addMessageAuthenticator(AaaManager.this.radiusSecret);
                     sendRadiusPacket(radiusPayload, inPacket);
+                    stateMachine.setWaitingForRadiusResponse(true);
 
                     if (stateMachine.state() != StateMachine.STATE_PENDING) {
                         stateMachine.requestAccess();

@@ -166,7 +166,4 @@ public class AaaStatistics {
         timedOutPackets.incrementAndGet();
     }
 
-    public void setTimedOutPackets(AtomicLong timedOutPackets) {
-        this.timedOutPackets = timedOutPackets;
-    }
 }
